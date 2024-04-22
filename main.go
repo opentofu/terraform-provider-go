@@ -5,11 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"os"
 	"reflect"
 	"strings"
 
-	"github.com/davecgh/go-spew/spew"
 	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
 	"github.com/hashicorp/terraform-plugin-go/tfprotov6/tf6server"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
@@ -204,8 +202,6 @@ func main() {
 					functions[GoNameToTFName(name)] = fn
 				}
 
-				// fmt.Fprintln(os.Stderr, "***functions:", spew.Sdump(functions))
-
 				return functions, nil
 			},
 			StaticFunctions: map[string]*Function{},
@@ -266,22 +262,18 @@ func GoFunctionToTFFunction(interpreter *interp.Interpreter, fn reflect.Value) (
 			},
 		},
 		Impl: func(args []*tfprotov6.DynamicValue) (*tfprotov6.DynamicValue, *tfprotov6.FunctionError) {
-			fmt.Fprintln(os.Stderr, "***args:", spew.Sdump(args))
 			goArgs := make([]reflect.Value, len(args))
 			for i, arg := range args {
 				var err error
 				goArg, err := ProtoToGo(parameters[0].Type, exportType.In(i), arg)
 				if err != nil {
-					fmt.Fprintln(os.Stderr, "***ProtoToGoErr:", err)
 					return nil, &tfprotov6.FunctionError{
 						Text: err.Error(),
 					}
 				}
 				goArgs[i] = reflect.ValueOf(goArg)
 			}
-			fmt.Fprintln(os.Stderr, "***goArgs:", goArgs)
 			goResult := fn.Call(goArgs)
-			fmt.Fprintln(os.Stderr, "***goResult:", goResult)
 			if len(goResult) > 1 {
 				err := goResult[1].Interface().(error)
 				if err != nil {
