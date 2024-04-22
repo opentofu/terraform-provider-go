@@ -8,9 +8,9 @@ terraform {
 }
 
 provider "go" {
-	go = file("./fixtures/lib.go")
+  go = file("./fixtures/lib.go")
 }
 
 output "test" {
-	value = provider::go::hello("papaya")
+  value = provider::go::hello("papaya")
 }
