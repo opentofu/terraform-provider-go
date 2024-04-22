@@ -8,6 +8,8 @@ In OpenTofu 1.7.0-beta1 and upwards you can configure the provider and pass it a
 - The package name should be `lib`
 - Exported functions need to start with upper-case letters.
 - The Tofu-facing name of the function **will be lower-cased**.
+- It supports simple types, like strings, integers, floats, and booleans.
+- It also supports complex type, like maps, slices, and nullable pointers (structs coming soon).
 
 This feature is an experimental preview and is subject to change before the OpenTofu 1.7.0 release.
 
