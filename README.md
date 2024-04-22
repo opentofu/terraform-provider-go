@@ -16,7 +16,7 @@ This feature is an experimental preview and is subject to change before the Open
 ```hcl
 // main.tf
 provider "go" {
-  go = file("./fixtures/lib.go")
+  go = file("./lib.go")
 }
 
 output "test" {
