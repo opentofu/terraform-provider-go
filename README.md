@@ -1,38 +1,36 @@
-# terraform-provider-lua
+# terraform-provider-go
 
-This is an experimental OpenTofu and Terraform function provider based on terraform-plugin-go.
+This is an experimental OpenTofu function provider based on terraform-plugin-go.
 
-It provides an "exec" function which takes a lua program as the first parameter and passes all additional parameters to the function defined in the lua file.
+It allows you to write Go helper functions next to your Tofu code, so that you can use them in your Tofu configuration, in a completely type-safe way. The provider is based on [Yaegi](https://github.com/traefik/yaegi), and most of the Go standard library is available.
+
+In OpenTofu 1.7.0-beta1 and upwards you can configure the provider and pass it a Go file to load.
+- The package name should be `lib`
+- Exported functions need to start with upper-case letters.
+- The Tofu-facing name of the function **will be lower-cased**.
+
+This feature is an experimental preview and is subject to change before the OpenTofu 1.7.0 release.
 
 ```hcl
-locals {
-    lua_echo = <<EOT
-
-function echo( input )
-    return input
-end
-
-return echo
-
-EOT
+// main.tf
+provider "go" {
+  go = file("./fixtures/lib.go")
 }
 
-output "example" {
-    value = provider::lua::exec(local.lua_echo, {"foo": {"bar": 42}})
+output "test" {
+  value = provider::go::hello("papaya")
 }
 ```
+```go
+// lib.go
+package lib
 
-In OpenTofu 1.7.0-beta1 you may configure the provider and pass it a lua library to load.  Any functions exposed in this library
-will be available as functions within the tofu configuration.  This feature is an experimental preview and is subject to change
-before the OpenTofu 1.7.0 release.
-
-```hcl
-provider "lua" {
-    lua = file("./lib.lua")
+func Hello(name string) string {
+	return "Hello, " + name + "!"
 }
-
-output "example" {
-    value = provider::lua::echo({"message": "Hello Functions!"})
-}
-
+```
+Output excerpt:
+```
+Changes to Outputs:
+  + test = "Hello, papaya!"
 ```

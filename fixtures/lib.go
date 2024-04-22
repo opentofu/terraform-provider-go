@@ -1,8 +1,5 @@
 package lib
 
-func Hello(name *string) map[string]*string {
-	return map[string]*string{
-		"hello": name,
-		"empty": nil,
-	}
+func Hello(name string) string {
+	return "Hello, " + name + "!"
 }

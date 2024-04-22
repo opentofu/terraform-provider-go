@@ -12,5 +12,5 @@ provider "go" {
 }
 
 output "test" {
-	value = provider::go::hello(null)
+	value = provider::go::hello("papaya")
 }
