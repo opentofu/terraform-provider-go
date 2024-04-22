@@ -4,18 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
-	"strconv"
+	"math/big"
+	"os"
+	"reflect"
 	"strings"
 
-	"github.com/Shopify/go-lua"
+	"github.com/davecgh/go-spew/spew"
 	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
 	"github.com/hashicorp/terraform-plugin-go/tfprotov6/tf6server"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
-	"github.com/zclconf/go-cty/cty"
-	"github.com/zclconf/go-cty/cty/gocty"
-	"github.com/zclconf/go-cty/cty/json"
-	"github.com/zclconf/go-cty/cty/msgpack"
+	"github.com/traefik/yaegi/interp"
+	"github.com/traefik/yaegi/stdlib"
 )
 
 type Function struct {
@@ -125,13 +124,13 @@ func (f *FunctionProvider) GetFunctions(context.Context, *tfprotov6.GetFunctions
 }
 
 func main() {
-	err := tf6server.Serve("registry.opentofu.org/opentofu/lua", func() tfprotov6.ProviderServer {
+	err := tf6server.Serve("registry.opentofu.org/opentofu/go", func() tfprotov6.ProviderServer {
 		provider := &FunctionProvider{
 			ProviderSchema: &tfprotov6.Schema{
 				Block: &tfprotov6.SchemaBlock{
 					Attributes: []*tfprotov6.SchemaAttribute{
 						&tfprotov6.SchemaAttribute{
-							Name:     "lua",
+							Name:     "go",
 							Type:     tftypes.String,
 							Required: true,
 						},
@@ -157,7 +156,7 @@ func main() {
 					}}
 				}
 
-				codeVal := cfg["lua"]
+				codeVal := cfg["go"]
 				var code string
 				err = codeVal.As(&code)
 				if err != nil {
@@ -168,126 +167,48 @@ func main() {
 					}}
 				}
 
-				functions := make(map[string]*Function)
-
-				// This is terrible, but I'm new to lua CAPI
-				regex := regexp.MustCompile(`function (.*)\(`)
-				funcs := regex.FindAllStringSubmatch(code, -1)
-				for _, bfn := range funcs {
-					fn := strings.TrimSpace(bfn[1])
-					functions[fn] = &Function{
-						tfprotov6.Function{
-							VariadicParameter: &tfprotov6.FunctionParameter{
-								AllowNullValue: true,
-								Name:           "args",
-								Type:           tftypes.DynamicPseudoType,
-							},
-							Return: &tfprotov6.FunctionReturn{
-								Type: tftypes.DynamicPseudoType,
-							},
-						},
-						func(args []*tfprotov6.DynamicValue) (*tfprotov6.DynamicValue, *tfprotov6.FunctionError) {
-							l := lua.NewState()
-							lua.OpenLibraries(l)
-
-							// Load lua code
-							if err := lua.DoString(l, code); err != nil {
-								return nil, &tfprotov6.FunctionError{Text: err.Error()}
-							}
-
-							// Setup function call
-							l.Global(fn)
-
-							// Check valid function loaded
-							if !l.IsFunction(-1) {
-								return nil, &tfprotov6.FunctionError{Text: `missing or invalid "return <function>" at end of input`}
-							}
-
-							// Load arguments
-							for _, arg := range args {
-								err := ProtoToLua(arg, l)
-								if err != nil {
-									return nil, &tfprotov6.FunctionError{Text: err.Error()}
-								}
-							}
-
-							// Call function, expecting one return value
-							l.Call(len(args), 1)
-
-							// Retrieve result
-							val, err := LuaToProto(l)
-							if err != nil {
-								return nil, &tfprotov6.FunctionError{Text: err.Error()}
-							}
-							return val, nil
-						},
-					}
+				interpreter := interp.New(interp.Options{})
+				if err := interpreter.Use(stdlib.Symbols); err != nil {
+					return nil, []*tfprotov6.Diagnostic{&tfprotov6.Diagnostic{
+						Severity: tfprotov6.DiagnosticSeverityError,
+						Summary:  "Failed to load Go standard library",
+						Detail:   err.Error(),
+					}}
 				}
+
+				_, err = interpreter.Eval(code)
+				if err != nil {
+					return nil, []*tfprotov6.Diagnostic{&tfprotov6.Diagnostic{
+						Severity: tfprotov6.DiagnosticSeverityError,
+						Summary:  "Failed to evaluate Go code",
+						Detail:   err.Error(),
+					}}
+				}
+
+				exports := interpreter.Symbols("lib")
+				libExports := exports["lib"]
+
+				functions := map[string]*Function{}
+				for name, export := range libExports {
+					if export.Kind() != reflect.Func {
+						continue
+					}
+					fn, err := GoFunctionToTFFunction(interpreter, export)
+					if err != nil {
+						return nil, []*tfprotov6.Diagnostic{&tfprotov6.Diagnostic{
+							Severity: tfprotov6.DiagnosticSeverityError,
+							Summary:  "Failed to convert Go function to TF function",
+							Detail:   fmt.Errorf("function %s: %w", name, err).Error(),
+						}}
+					}
+					functions[GoNameToTFName(name)] = fn
+				}
+
+				// fmt.Fprintln(os.Stderr, "***functions:", spew.Sdump(functions))
 
 				return functions, nil
 			},
-			StaticFunctions: map[string]*Function{
-				"exec": &Function{
-					tfprotov6.Function{
-						Parameters: []*tfprotov6.FunctionParameter{&tfprotov6.FunctionParameter{
-							Name: "code",
-							Type: tftypes.String,
-						}},
-						VariadicParameter: &tfprotov6.FunctionParameter{
-							AllowNullValue: true,
-							Name:           "args",
-							Type:           tftypes.DynamicPseudoType,
-						},
-						Return: &tfprotov6.FunctionReturn{
-							Type: tftypes.DynamicPseudoType,
-						},
-					},
-					func(args []*tfprotov6.DynamicValue) (*tfprotov6.DynamicValue, *tfprotov6.FunctionError) {
-						codeVal, err := args[0].Unmarshal(tftypes.String)
-						if err != nil {
-							return nil, &tfprotov6.FunctionError{Text: err.Error()}
-						}
-
-						var code string
-						err = codeVal.As(&code)
-						if err != nil {
-							return nil, &tfprotov6.FunctionError{Text: err.Error()}
-						}
-						args = args[1:]
-
-						l := lua.NewState()
-						lua.OpenLibraries(l)
-
-						// Load lua code
-						if err := lua.DoString(l, code); err != nil {
-							return nil, &tfprotov6.FunctionError{Text: err.Error()}
-						}
-
-						// Check valid function loaded
-						if !l.IsFunction(-1) {
-							return nil, &tfprotov6.FunctionError{Text: `missing or invalid "return <function>" at end of input`}
-						}
-
-						// Load arguments
-						for _, arg := range args {
-							err := ProtoToLua(arg, l)
-							if err != nil {
-								return nil, &tfprotov6.FunctionError{Text: err.Error()}
-							}
-						}
-
-						// Call function, expecting one return value
-						l.Call(len(args), 1)
-
-						// Retrieve result
-						val, err := LuaToProto(l)
-						if err != nil {
-							return nil, &tfprotov6.FunctionError{Text: err.Error()}
-						}
-						return val, nil
-					},
-				},
-			},
+			StaticFunctions: map[string]*Function{},
 		}
 		return provider
 	})
@@ -296,165 +217,396 @@ func main() {
 	}
 }
 
-func ProtoToLua(arg *tfprotov6.DynamicValue, l *lua.State) error {
-	argCty, err := ProtoToCty(arg)
+func GoFunctionToTFFunction(interpreter *interp.Interpreter, fn reflect.Value) (*Function, []*tfprotov6.Diagnostic) {
+	exportType := fn.Type()
+	var parameters []*tfprotov6.FunctionParameter
+	for i := 0; i < exportType.NumIn(); i++ {
+		functionParameter, err := GoTypeToTFFunctionParam(exportType.In(i))
+		if err != nil {
+			return nil, []*tfprotov6.Diagnostic{&tfprotov6.Diagnostic{
+				Severity: tfprotov6.DiagnosticSeverityError,
+				Summary:  "Failed to convert Argument type to TF type",
+				Detail:   fmt.Errorf("argument %d: %w", i, err).Error(),
+			}}
+		}
+		parameters = append(parameters, functionParameter)
+	}
+	if exportType.NumOut() == 0 {
+		return nil, []*tfprotov6.Diagnostic{&tfprotov6.Diagnostic{
+			Severity: tfprotov6.DiagnosticSeverityError,
+			Summary:  "Function must return a value",
+		}}
+	}
+	if exportType.NumOut() > 2 {
+		return nil, []*tfprotov6.Diagnostic{&tfprotov6.Diagnostic{
+			Severity: tfprotov6.DiagnosticSeverityError,
+			Summary:  "Function must return at most two values",
+		}}
+	}
+	if exportType.NumOut() == 2 && exportType.Out(1) != reflect.TypeFor[error]() {
+		return nil, []*tfprotov6.Diagnostic{&tfprotov6.Diagnostic{
+			Severity: tfprotov6.DiagnosticSeverityError,
+			Summary:  "Second return value, if exists, must be an error",
+		}}
+	}
+	output := exportType.Out(0)
+	outputType, err := GoTypeToTFType(output)
 	if err != nil {
-		return err
+		return nil, []*tfprotov6.Diagnostic{&tfprotov6.Diagnostic{
+			Severity: tfprotov6.DiagnosticSeverityError,
+			Summary:  "Failed to convert Function output type to TF type",
+			Detail:   err.Error(),
+		}}
 	}
+	return &Function{
+		Function: tfprotov6.Function{
+			Parameters: parameters,
+			Return: &tfprotov6.FunctionReturn{
+				Type: outputType,
+			},
+		},
+		Impl: func(args []*tfprotov6.DynamicValue) (*tfprotov6.DynamicValue, *tfprotov6.FunctionError) {
+			fmt.Fprintln(os.Stderr, "***args:", spew.Sdump(args))
+			goArgs := make([]reflect.Value, len(args))
+			for i, arg := range args {
+				var err error
+				goArg, err := ProtoToGo(parameters[0].Type, exportType.In(i), arg)
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "***ProtoToGoErr:", err)
+					return nil, &tfprotov6.FunctionError{
+						Text: err.Error(),
+					}
+				}
+				goArgs[i] = reflect.ValueOf(goArg)
+			}
+			fmt.Fprintln(os.Stderr, "***goArgs:", goArgs)
+			goResult := fn.Call(goArgs)
+			fmt.Fprintln(os.Stderr, "***goResult:", goResult)
+			if len(goResult) > 1 {
+				err := goResult[1].Interface().(error)
+				if err != nil {
+					return nil, &tfprotov6.FunctionError{
+						Text: err.Error(),
+					}
+				}
+			}
 
-	return CtyToLua(argCty, l)
-}
-
-func LuaToProto(l *lua.State) (*tfprotov6.DynamicValue, error) {
-	argCty, err := LuaToCty(l)
-	if err != nil {
-		return nil, err
-	}
-	return CtyToProto(argCty)
-}
-
-func ProtoToCty(arg *tfprotov6.DynamicValue) (cty.Value, error) {
-	// Decode using cty directly as it supports DynamicPseudoType
-	// This is inspired by github.com/apparentlymart/go-tf-func-provider
-	if len(arg.MsgPack) != 0 {
-		return msgpack.Unmarshal(arg.MsgPack, cty.DynamicPseudoType)
-	}
-	if len(arg.JSON) != 0 {
-		return json.Unmarshal(arg.JSON, cty.DynamicPseudoType)
-	}
-	panic("unknown encoding")
-}
-
-func CtyToProto(ctyVal cty.Value) (*tfprotov6.DynamicValue, error) {
-	result, err := msgpack.Marshal(ctyVal, cty.DynamicPseudoType)
-	if err != nil {
-		return nil, err
-	}
-	return &tfprotov6.DynamicValue{
-		MsgPack: result,
+			out, err := GoToProto(outputType, goResult[0].Interface())
+			if err != nil {
+				return nil, &tfprotov6.FunctionError{
+					Text: err.Error(),
+				}
+			}
+			return out, nil
+		},
 	}, nil
 }
 
-func CtyToLua(arg cty.Value, l *lua.State) error {
-	switch t := arg.Type(); t {
-	case cty.Number:
-		var v float64
-		err := gocty.FromCtyValue(arg, &v)
-		if err != nil {
-			return err
+func TfValueToProto(tfType tftypes.Type, tfVal tftypes.Value) (*tfprotov6.DynamicValue, error) {
+	value, err := tfprotov6.NewDynamicValue(tfType, tfVal)
+	return &value, err
+}
+
+func GoTypeToTFFunctionParam(t reflect.Type) (*tfprotov6.FunctionParameter, error) {
+	outType, err := GoTypeToTFType(t)
+	if err != nil {
+		return nil, err
+	}
+
+	return &tfprotov6.FunctionParameter{
+		AllowUnknownValues: false,
+		AllowNullValue:     t.Kind() == reflect.Ptr,
+		Type:               outType,
+	}, nil
+}
+
+func GoTypeToTFType(t reflect.Type) (tftypes.Type, error) {
+	switch t.Kind() {
+	case reflect.String:
+		return tftypes.String, nil
+	case reflect.Bool:
+		return tftypes.Bool, nil
+	case reflect.Int, reflect.Float64:
+		return tftypes.Number, nil
+	case reflect.Ptr:
+		return GoTypeToTFType(t.Elem())
+	case reflect.Interface:
+		if reflect.TypeFor[interface{}]().Implements(t) {
+			return tftypes.DynamicPseudoType, nil
+		} else {
+			return nil, fmt.Errorf("unsupported interface type %s, only interface{}/any interface type is supported", t.String())
 		}
-		l.PushNumber(v)
-		return nil
-	case cty.String:
-		var v string
-		err := gocty.FromCtyValue(arg, &v)
+	case reflect.Slice:
+		elementType, err := GoTypeToTFType(t.Elem())
 		if err != nil {
-			return err
+			return nil, err
 		}
-		l.PushString(v)
-		return nil
-	case cty.Bool:
-		var v bool
-		err := gocty.FromCtyValue(arg, &v)
+		return tftypes.List{
+			ElementType: elementType,
+		}, nil
+	case reflect.Map:
+		if t.Key().Kind() != reflect.String {
+			return nil, fmt.Errorf("unsupported map key type %s, only string keys are supported", t.Key().String())
+		}
+		valueType, err := GoTypeToTFType(t.Elem())
 		if err != nil {
-			return err
+			return nil, err
 		}
-		l.PushBoolean(v)
-		return nil
+		return tftypes.Map{
+			ElementType: valueType,
+		}, nil
+	// case reflect.Struct:
+	// 	attributeTypes := make(map[string]tftypes.Type)
+	// 	for i := 0; i < t.NumField(); i++ {
+	// 		field := t.Field(i)
+	// 		fieldType, err := GoTypeToTFType(field.Type)
+	// 		if err != nil {
+	// 			return nil, err
+	// 		}
+	// 		// TODO: By default we just lowercase now. Ideally we could use a struct tag.
+	// 		attributeTypes[GoNameToTFName(field.Name)] = fieldType
+	// 	}
+	// 	return tftypes.Object{
+	// 		AttributeTypes: attributeTypes,
+	// 	}, nil
 	default:
-		if t.IsObjectType() || t.IsMapType() {
-			l.NewTable()
-			for k, v := range arg.AsValueMap() {
-				l.PushString(k)
-				err := CtyToLua(v, l)
-				if err != nil {
-					return err
-				}
-				l.SetTable(-3)
-			}
-			return nil
-		}
-		if t.IsListType() || t.IsSetType() || t.IsTupleType() {
-			l.NewTable()
-			for k, v := range arg.AsValueSlice() {
-				l.PushInteger(k)
-				err := CtyToLua(v, l)
-				if err != nil {
-					return err
-				}
-				l.SetTable(-3)
-			}
-			return nil
-		}
-		return fmt.Errorf("unsupported parameter type %#v", arg.Type())
+		return nil, fmt.Errorf("unsupported type %s", t.String())
 	}
 }
 
-func LuaToCty(l *lua.State) (cty.Value, error) {
-	if l.IsNone(-1) {
-		return cty.NilVal, fmt.Errorf("none value should not be returned")
+func GoNameToTFName(name string) string {
+	return strings.ToLower(name)
+}
+
+func ProtoToGo(argumentTfType tftypes.Type, argumentGoType reflect.Type, arg *tfprotov6.DynamicValue) (any, error) {
+	if len(arg.JSON) == 0 && len(arg.MsgPack) == 0 {
+		// This is an edge-case not properly handled by arg.IsNull().
+		// It happens when you pass (from tf) the value `null`, to a function expecting e.g. a string pointer.
+
+		// We can't just return nil here, because we need a *typed* interface{} :)
+		// If we'd return nil here, then the later reflect call of our dynamically created functions
+		// would fail during the dynamic type-check.
+		return reflect.Zero(argumentGoType).Interface(), nil
+	}
+	argTf, err := arg.Unmarshal(argumentTfType)
+	if err != nil {
+		return nil, err
 	}
 
-	switch t := l.TypeOf(-1); t {
-	case lua.TypeNil:
-		return cty.NilVal, nil
-	case lua.TypeBoolean:
-		return cty.BoolVal(l.ToBoolean(-1)), nil
-	case lua.TypeNumber:
-		number, _ := l.ToNumber(-1)
-		return cty.NumberFloatVal(number), nil
-	case lua.TypeString:
-		str, _ := l.ToString(-1)
-		return cty.StringVal(str), nil
-	case lua.TypeTable:
-		// https://stackoverflow.com/a/6142700
-		mv := make(map[string]cty.Value)
+	return TfToGoValue(argumentGoType, argTf)
+}
 
-		// Space for key
-		l.PushNil()
+func TfToGoValue(goType reflect.Type, tfValue tftypes.Value) (any, error) {
+	if tfValue.IsNull() {
+		return nil, nil
+	}
 
-		// Push value
-		for l.Next(-2) {
-			// Copy key to top of stack
-			l.PushValue(-2)
+	switch goType.Kind() {
+	case reflect.String:
+		var str string
+		if err := tfValue.As(&str); err != nil {
+			return nil, err
+		}
+		return str, nil
+	case reflect.Bool:
+		var b bool
+		if err := tfValue.As(&b); err != nil {
+			return nil, err
+		}
+		return b, nil
+	case reflect.Int:
+		var bigFloat big.Float
+		if err := tfValue.As(&bigFloat); err != nil {
+			return nil, err
+		}
 
-			// Decode key (also modifies)
-			key, ok := l.ToString(-1)
-			if !ok {
-				return cty.NilVal, fmt.Errorf("bad table index")
-			}
+		f, _ := bigFloat.Int64()
+		return int(f), nil
+	case reflect.Float64:
+		var bigFloat big.Float
+		if err := tfValue.As(&bigFloat); err != nil {
+			return nil, err
+		}
 
-			l.Pop(1)
+		f, _ := bigFloat.Int64()
+		return f, nil
+	case reflect.Ptr:
+		if tfValue.IsNull() {
+			return nil, nil
+		}
+		value, err := TfToGoValue(goType.Elem(), tfValue)
+		if err != nil {
+			return nil, err
+		}
+		// If we return &value, then the type will be *interface{}.
+		// So we construct a concrete type pointer via reflect.
+		// This way, we get e.g. *string instead of *interface{}.
+		out := reflect.New(reflect.TypeOf(value))
+		out.Elem().Set(reflect.ValueOf(value))
+		return out.Interface(), nil
+	case reflect.Interface:
+		panic("implement interface{}")
+	case reflect.Slice:
+		var tfValues []tftypes.Value
+		if err := tfValue.As(&tfValues); err != nil {
+			return nil, err
+		}
 
-			// Decode Value (also modifies)
-			val, err := LuaToCty(l)
+		out := reflect.MakeSlice(goType, len(tfValues), len(tfValues))
+		for i := 0; i < len(tfValues); i++ {
+			elem, err := TfToGoValue(goType.Elem(), tfValues[i])
 			if err != nil {
-				return cty.NilVal, err
+				return nil, err
 			}
-			mv[key] = val
-
-			l.Pop(1)
+			out.Index(i).Set(reflect.ValueOf(elem))
 		}
-
-		av := make([]cty.Value, len(mv))
-
-		off := 1
-		// Hack in an off-by-one offset
-		if _, ok := mv["0"]; ok {
-			off = 0
+		return out.Interface(), nil
+	case reflect.Map:
+		var tfMap map[string]tftypes.Value
+		if err := tfValue.As(&tfMap); err != nil {
+			return nil, err
 		}
-
-		// This is inefficient, but it works
-		for i := off; i < len(av)+off; i++ {
-			if v, ok := mv[strconv.Itoa(i)]; ok {
-				av[i] = v
-			} else {
-				// Not a coherent list
-				return cty.ObjectVal(mv), nil
+		out := reflect.MakeMap(goType)
+		for key, tfElement := range tfMap {
+			elem, err := TfToGoValue(goType.Elem(), tfElement)
+			if err != nil {
+				return nil, err
 			}
+			out.SetMapIndex(reflect.ValueOf(key), reflect.ValueOf(elem))
 		}
-		return cty.ListVal(av), nil
+		return out.Interface(), nil
 	default:
-		return cty.NilVal, fmt.Errorf("unhanded return type %s!", t)
+		return nil, fmt.Errorf("unsupported type %s", goType.String())
+	}
+}
+
+// func CtyToGo(goType reflect.Type, ctyValue cty.Value) (any, error) {
+// 	ctyType := ctyValue.Type()
+// 	switch goType.Kind() {
+// 	case reflect.String:
+// 		if ctyType != cty.String {
+// 			return nil, fmt.Errorf("expected string, got %s", ctyType.FriendlyName())
+// 		}
+// 		return ctyValue.AsString(), nil
+// 	case reflect.Bool:
+// 		if ctyType != cty.Bool {
+// 			return nil, fmt.Errorf("expected bool, got %s", ctyType.FriendlyName())
+// 		}
+// 		return ctyValue.True(), nil
+// 	case reflect.Int:
+// 		if ctyType != cty.Number {
+// 			return nil, fmt.Errorf("expected number, got %s", ctyType.FriendlyName())
+// 		}
+// 		f, _ := ctyValue.AsBigFloat().Int64()
+// 		return int(f), nil
+// 	case reflect.Float64:
+// 		if ctyType != cty.Number {
+// 			return nil, fmt.Errorf("expected number, got %s", ctyType.FriendlyName())
+// 		}
+// 		f, _ := ctyValue.AsBigFloat().Float64()
+// 		return f, nil
+// 	case reflect.Ptr:
+// 		if ctyValue.IsNull() {
+// 			return nil, nil
+// 		}
+// 		return CtyToGo(goType.Elem(), ctyValue)
+// 	case reflect.Interface:
+// 		panic("implement interface{}")
+// 	case reflect.Slice:
+// 		if !ctyType.IsListType() {
+// 			return nil, fmt.Errorf("expected list, got %s", ctyType.FriendlyName())
+// 		}
+// 		out := reflect.MakeSlice(goType, ctyValue.LengthInt(), ctyValue.LengthInt())
+// 		for i := 0; i < ctyValue.LengthInt(); i++ {
+// 			elem, err := CtyToGo(goType.Elem(), ctyValue.Index(cty.NumberIntVal(int64(i))))
+// 			if err != nil {
+// 				return nil, err
+// 			}
+// 			out.Index(i).Set(reflect.ValueOf(elem))
+// 		}
+// 		return out.Interface(), nil
+// 	case reflect.Map:
+// 		if !ctyType.IsMapType() {
+// 			return nil, fmt.Errorf("expected map, got %s", ctyType.FriendlyName())
+// 		}
+// 		out := reflect.MakeMap(goType)
+// 		for key, ctyElement := range ctyValue.AsValueMap() {
+// 			elem, err := CtyToGo(goType.Elem(), ctyElement)
+// 			if err != nil {
+// 				return nil, err
+// 			}
+// 			out.SetMapIndex(reflect.ValueOf(key), reflect.ValueOf(elem))
+// 		}
+// 		return out.Interface(), nil
+// 	default:
+// 		return nil, fmt.Errorf("unsupported type %s", goType.String())
+// 	}
+// }
+
+func GoToProto(tfType tftypes.Type, value any) (*tfprotov6.DynamicValue, error) {
+	tfValue, err := GoToTfValue(tfType, value)
+	if err != nil {
+		return nil, err
+	}
+	return TfValueToProto(tfType, tfValue)
+}
+
+func GoToTfValue(tfType tftypes.Type, value any) (tftypes.Value, error) {
+	if value == nil {
+		if err := tftypes.ValidateValue(tfType, nil); err != nil {
+			return tftypes.Value{}, err
+		}
+		return tftypes.NewValue(tfType, nil), nil
+	}
+
+	switch {
+	case tfType.Is(tftypes.String):
+		return tftypes.NewValue(tftypes.String, value), nil
+	case tfType.Is(tftypes.Bool):
+		return tftypes.NewValue(tftypes.Bool, value), nil
+	case tfType.Is(tftypes.Number):
+		switch value := value.(type) {
+		case int:
+			return tftypes.NewValue(tftypes.Number, value), nil
+		case float64:
+			return tftypes.NewValue(tftypes.Number, value), nil
+		default:
+			return tftypes.Value{}, fmt.Errorf("expected number, got %T", value)
+		}
+	case tfType.Is(tftypes.DynamicPseudoType):
+		panic("implement interface{}")
+	default:
+		switch tfType := tfType.(type) {
+		case tftypes.List:
+			if reflect.TypeOf(value).Kind() != reflect.Slice {
+				return tftypes.Value{}, fmt.Errorf("expected slice, got %T", value)
+			}
+			slice := reflect.ValueOf(value)
+			out := make([]tftypes.Value, slice.Len())
+			for i := 0; i < slice.Len(); i++ {
+				elem, err := GoToTfValue(tfType.ElementType, slice.Index(i).Interface())
+				if err != nil {
+					return tftypes.Value{}, err
+				}
+				out[i] = elem
+			}
+			return tftypes.NewValue(tfType, out), nil
+		case tftypes.Map:
+			if reflect.TypeOf(value).Kind() != reflect.Map {
+				return tftypes.Value{}, fmt.Errorf("expected map, got %T", value)
+			}
+			m := reflect.ValueOf(value)
+			out := make(map[string]tftypes.Value, m.Len())
+			for _, key := range m.MapKeys() {
+				elem, err := GoToTfValue(tfType.ElementType, m.MapIndex(key).Interface())
+				if err != nil {
+					return tftypes.Value{}, err
+				}
+				out[key.String()] = elem
+			}
+			return tftypes.NewValue(tfType, out), nil
+		default:
+			return tftypes.Value{}, fmt.Errorf("unsupported type %s", tfType.String())
+		}
 	}
 }

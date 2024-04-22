@@ -1,10 +1,12 @@
-module github.com/opentofu/terraform-provider-lua
+module github.com/opentofu/terraform-provider-go
 
 go 1.22.2
 
 require (
 	github.com/Shopify/go-lua v0.0.0-20240312125312-5d657e363856
+	github.com/davecgh/go-spew v1.1.1
 	github.com/hashicorp/terraform-plugin-go v0.22.1
+	github.com/traefik/yaegi v0.16.1
 	github.com/zclconf/go-cty v1.13.1
 )
 
