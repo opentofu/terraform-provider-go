@@ -9,9 +9,11 @@ In OpenTofu 1.7.0-beta1 and upwards you can configure the provider and pass it a
 - Exported functions need to start with upper-case letters.
 - The Tofu-facing name of the function **will be lower-cased**.
 - It supports simple types, like strings, integers, floats, and booleans.
-- It also supports complex type, like maps, slices, and nullable pointers (structs coming soon).
+- It also supports complex type, like maps, slices, nullable pointers, and structures.
 
 This feature is an experimental preview and is subject to change before the OpenTofu 1.7.0 release.
+
+## Example
 
 ```hcl
 // main.tf
@@ -36,3 +38,46 @@ Output excerpt:
 Changes to Outputs:
   + test = "Hello, papaya!"
 ```
+
+## More involved example
+
+```hcl
+// main.tf
+provider "go" {
+  go = file("./lib.go")
+}
+
+output "test" {
+  value = provider::go::hello({
+    name = "papaya",
+    surname = "bacon",
+  })
+}
+```
+```go
+// lib.go
+package lib
+
+import (
+	"fmt"
+)
+
+type Person struct {
+	// We can let it default to the un-capitalized field name.
+	Name string
+	// Or use a struct tag to specify the object field name explicitly.
+	Surname string `tf:"surname"`
+}
+
+func Hello(person Person) string {
+	return fmt.Sprintf("Hello, %s %s!", person.Name, person.Surname)
+}
+```
+Output excerpt:
+```
+Changes to Outputs:
+  + test = "Hello, papaya bacon!"
+```
+
+Moreover, all of this is type-safe and mistakes will be caught by tofu. So passing a number to the function will fail with `object required`, while forgetting e.g. the surname will fail with `attribute "surname" is required`.
+

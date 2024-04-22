@@ -347,23 +347,36 @@ func GoTypeToTFType(t reflect.Type) (tftypes.Type, error) {
 		return tftypes.Map{
 			ElementType: valueType,
 		}, nil
-	// case reflect.Struct:
-	// 	attributeTypes := make(map[string]tftypes.Type)
-	// 	for i := 0; i < t.NumField(); i++ {
-	// 		field := t.Field(i)
-	// 		fieldType, err := GoTypeToTFType(field.Type)
-	// 		if err != nil {
-	// 			return nil, err
-	// 		}
-	// 		// TODO: By default we just lowercase now. Ideally we could use a struct tag.
-	// 		attributeTypes[GoNameToTFName(field.Name)] = fieldType
-	// 	}
-	// 	return tftypes.Object{
-	// 		AttributeTypes: attributeTypes,
-	// 	}, nil
+	case reflect.Struct:
+		attributeTypes := make(map[string]tftypes.Type)
+		for i := 0; i < t.NumField(); i++ {
+			field := t.Field(i)
+			fieldType, err := GoTypeToTFType(field.Type)
+			if err != nil {
+				return nil, err
+			}
+			attributeTypes[getTfObjectGoFieldName(field)] = fieldType
+		}
+		return tftypes.Object{
+			AttributeTypes: attributeTypes,
+		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported type %s", t.String())
 	}
+}
+
+func getTfObjectGoFieldName(field reflect.StructField) string {
+	if tag := field.Tag.Get("tf"); tag != "" {
+		return tag
+	}
+	return uncapitalize(field.Name)
+}
+
+func uncapitalize(s string) string {
+	if len(s) == 1 {
+		return strings.ToLower(s)
+	}
+	return strings.ToLower(s[:1]) + s[1:]
 }
 
 func GoNameToTFName(name string) string {
@@ -467,6 +480,31 @@ func TfToGoValue(goType reflect.Type, tfValue tftypes.Value) (any, error) {
 			out.SetMapIndex(reflect.ValueOf(key), reflect.ValueOf(elem))
 		}
 		return out.Interface(), nil
+	case reflect.Struct:
+		var tfMap map[string]tftypes.Value
+		if err := tfValue.As(&tfMap); err != nil {
+			return nil, err
+		}
+		// This is a fun one, you'd fine reflect.Zero(goType) should do the same, right?
+		// Nope! If you use reflect.Zero, then the fields of it won't be addressable.
+		// If the fields aren't addressable, they're not settable.
+		// So, we use reflect.New and then take the pointed-to value, this way it is in fact addressable.
+		out := reflect.New(goType).Elem()
+		for i := 0; i < goType.NumField(); i++ {
+			field := goType.Field(i)
+			tfName := getTfObjectGoFieldName(field)
+			tfElement, ok := tfMap[tfName]
+			if !ok {
+				return nil, fmt.Errorf("missing object field %s", tfName)
+			}
+			elem, err := TfToGoValue(field.Type, tfElement)
+			if err != nil {
+				return nil, err
+			}
+			out.Field(i).Set(reflect.ValueOf(elem))
+		}
+		return out.Interface(), nil
+
 	default:
 		return nil, fmt.Errorf("unsupported type %s", goType.String())
 	}
@@ -595,6 +633,21 @@ func GoToTfValue(tfType tftypes.Type, value any) (tftypes.Value, error) {
 					return tftypes.Value{}, err
 				}
 				out[key.String()] = elem
+			}
+			return tftypes.NewValue(tfType, out), nil
+		case tftypes.Object:
+			if reflect.TypeOf(value).Kind() != reflect.Struct {
+				return tftypes.Value{}, fmt.Errorf("expected struct, got %T", value)
+			}
+			out := make(map[string]tftypes.Value, len(tfType.AttributeTypes))
+			for i := 0; i < reflect.TypeOf(value).NumField(); i++ {
+				field := reflect.TypeOf(value).Field(i)
+				tfName := getTfObjectGoFieldName(field)
+				elem, err := GoToTfValue(tfType.AttributeTypes[tfName], reflect.ValueOf(value).Field(i).Interface())
+				if err != nil {
+					return tftypes.Value{}, err
+				}
+				out[tfName] = elem
 			}
 			return tftypes.NewValue(tfType, out), nil
 		default:
