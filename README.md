@@ -81,3 +81,15 @@ Changes to Outputs:
 
 Moreover, all of this is type-safe and mistakes will be caught by tofu. So passing a number to the function will fail with `object required`, while forgetting e.g. the surname will fail with `attribute "surname" is required`.
 
+## Importing
+Here's a snippet to require the provider in your OpenTofu configuration:
+```hcl
+terraform {
+  required_providers {
+    go = {
+      source  = "registry.opentofu.org/opentofu/go"
+      version = "0.0.1"
+    }
+  }
+}
+```

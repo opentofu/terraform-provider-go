@@ -191,13 +191,9 @@ func main() {
 					if export.Kind() != reflect.Func {
 						continue
 					}
-					fn, err := GoFunctionToTFFunction(interpreter, export)
-					if err != nil {
-						return nil, []*tfprotov6.Diagnostic{&tfprotov6.Diagnostic{
-							Severity: tfprotov6.DiagnosticSeverityError,
-							Summary:  "Failed to convert Go function to TF function",
-							Detail:   fmt.Errorf("function %s: %w", name, err).Error(),
-						}}
+					fn, diags := GoFunctionToTFFunction(interpreter, export)
+					if len(diags) > 0 {
+						return nil, diags
 					}
 					functions[GoNameToTFName(name)] = fn
 				}
@@ -265,7 +261,7 @@ func GoFunctionToTFFunction(interpreter *interp.Interpreter, fn reflect.Value) (
 			goArgs := make([]reflect.Value, len(args))
 			for i, arg := range args {
 				var err error
-				goArg, err := ProtoToGo(parameters[0].Type, exportType.In(i), arg)
+				goArg, err := ProtoToGo(parameters[i].Type, exportType.In(i), arg)
 				if err != nil {
 					return nil, &tfprotov6.FunctionError{
 						Text: err.Error(),
