@@ -270,7 +270,7 @@ func GoFunctionToTFFunction(interpreter *interp.Interpreter, fn reflect.Value) (
 				goArgs[i] = reflect.ValueOf(goArg)
 			}
 			goResult := fn.Call(goArgs)
-			if len(goResult) > 1 {
+			if len(goResult) > 1 && !goResult[1].IsNil() {
 				err := goResult[1].Interface().(error)
 				if err != nil {
 					return nil, &tfprotov6.FunctionError{
