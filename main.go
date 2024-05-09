@@ -429,7 +429,7 @@ func TfToGoValue(goType reflect.Type, tfValue tftypes.Value) (any, error) {
 			return nil, err
 		}
 
-		f, _ := bigFloat.Int64()
+		f, _ := bigFloat.Float64()
 		return f, nil
 	case reflect.Ptr:
 		if tfValue.IsNull() {
