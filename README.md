@@ -13,6 +13,11 @@ In OpenTofu 1.7.0-beta1 and upwards you can configure the provider and pass it a
 
 This feature is an experimental preview and is subject to change before the OpenTofu 1.7.0 release.
 
+> :warning: When writing Go, the features available depend on the version of
+> Go used to build the relevant OpenTofu release you're using.  For example,
+> OpenTofu 1.7.0 was built with Go 1.21, so features only available in 1.22+
+> will not work and may result in obscure error messages.
+
 ## Example
 
 ```hcl
